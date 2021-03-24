@@ -314,7 +314,7 @@ def setup_model_and_optimizer(model_provider_func):
                                                     batch_size_small=get_global_batch_size(args),
                                                     n_batches=5,
                                                     beta=0.9)
-        
+
     return model, optimizer, lr_scheduler
 
 
@@ -553,7 +553,8 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
         if args.log_grad_noise_scale:
             noise_scale = model.grad_noise_scale.noise_scale
             wandb.log({'noise_scale': noise_scale}, step=iteration)
-            log_string += ' Grad Noise Scale: {:.3E} |'.format(noise_scale)
+            if get_use_wandb() and torch.distributed.get_rank() == 0:
+                log_string += ' Grad Noise Scale: {:.3E} |'.format(noise_scale)
 
     return report_memory_flag
 
