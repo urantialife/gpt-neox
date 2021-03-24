@@ -321,6 +321,8 @@ def _add_training_args(parser):
                        help='Enable one bit adam optimizer [MUST BE USING DEEPSPEED]')
     group.add_argument('--sm3', action='store_true',
                        help='Enable sm3 optimizer')
+    group.add_argument('--log-grad-noise-scale', action='store_true',
+                       help='log the gradient noise scale of the model during training')
     return parser
 
 
