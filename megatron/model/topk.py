@@ -17,9 +17,10 @@ def topk_items(x, k):
 
 def topk_items_rowwise(x, k):
     # [b, np, sq, sk]
-    values, _ = torch.topk(x, k)  # get top k items in each row
-    top = values[:, :, :, -1].unsqueeze(3).expand_as(x)  # broadcast smallest topk item in row across the whole row
-    x = x.masked_fill(torch.lt(x, top), float('-inf')).type_as(x)  # masks all values < smallest topk item to -inf
+    values, _ = x.topk(k, dim=-1) # get top k items in each row
+    top = values[..., -1].unsqueeze(-1).expand_as(x)  # broadcast smallest topk item in row across the whole row
+    mask = x < top
+    x = x.masked_fill(mask, -torch.finfo(x.dtype).max)  # masks all values < smallest topk item to -inf
     return x
 
 
