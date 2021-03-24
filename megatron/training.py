@@ -134,12 +134,6 @@ def get_model(model_provider_func):
     # Build model on cpu.
     model = model_provider_func()
 
-    if args.log_grad_noise_scale:
-        model.grad_noise_scale = GradientNoiseScale(model=model,
-                                                    batch_size_small=get_global_batch_size(args),
-                                                    n_batches=5,
-                                                    beta=0.9)
-
     if args.deepspeed:
         # DeepSpeed handles CUDA, FP16, and DDP components.
         return model
@@ -315,6 +309,12 @@ def setup_model_and_optimizer(model_provider_func):
     while hasattr(unwrapped_model, 'module'):
         unwrapped_model = unwrapped_model.module
 
+    if args.log_grad_noise_scale:
+        model.grad_noise_scale = GradientNoiseScale(model=model,
+                                                    batch_size_small=get_global_batch_size(args),
+                                                    n_batches=5,
+                                                    beta=0.9)
+        
     return model, optimizer, lr_scheduler
 
 
