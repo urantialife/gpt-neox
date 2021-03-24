@@ -81,6 +81,7 @@ class Encoder(object):
     def encode(self, json_line):
         data = json.loads(json_line)
         ids = {}
+        # TODO: grouping here?
         for key in self.args.json_keys:
             text = data[key]
             doc_ids = []
@@ -176,7 +177,6 @@ def main():
     proc_start = time.time()
     total_bytes_processed = 0
     print("Time to startup:", startup_end - startup_start)
-
     for i, (doc, bytes_processed) in enumerate(encoded_docs, start=1):
         total_bytes_processed += bytes_processed
         for key, sentences in doc.items():

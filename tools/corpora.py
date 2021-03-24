@@ -134,3 +134,6 @@ def prepare_dataset(dataset_name):
     else:
         d = DownloaderClass()
         d.prepare()
+
+if __name__ == "__main__":
+    prepare_dataset("enron")

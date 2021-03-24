@@ -50,7 +50,7 @@ from megatron.model import get_params_for_weight_decay_optimization
 from megatron.utils import check_adlr_autoresume_termination
 from megatron.utils import make_data_loader
 from megatron.utils import report_memory
-
+from megatron.utils import GradientNoiseScale
 import deepspeed
 
 
@@ -133,6 +133,12 @@ def get_model(model_provider_func):
 
     # Build model on cpu.
     model = model_provider_func()
+
+    if args.log_grad_noise_scale:
+        model.grad_noise_scale = GradientNoiseScale(model=model,
+                                                    batch_size_small=get_global_batch_size(args),
+                                                    n_batches=5,
+                                                    beta=0.9)
 
     if args.deepspeed:
         # DeepSpeed handles CUDA, FP16, and DDP components.
@@ -327,6 +333,7 @@ def backward_step(optimizer, model, loss):
             optimizer.backward(loss, update_master_grads=False)
         else:
             loss.backward()
+
     timers('backward-backward').stop()
 
     if args.deepspeed:
@@ -356,6 +363,9 @@ def backward_step(optimizer, model, loss):
             else:
                 optimizer.clip_master_grads(args.clip_grad)
         timers('backward-clip-grad').stop()
+
+    if args.log_grad_noise_scale:
+        model.grad_noise_scale.update()
 
 
 def train_step(forward_step_func, data_iterator,
@@ -505,7 +515,7 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
             wandb.log({'samples/sec': samples_per_sec}, step=iteration)
             wandb.log({'iteration_time': iteration_time}, step=iteration)
         log_string += ' iteration {:8d}/{:8d} |'.format(iteration,
-                                                       args.train_iters)
+                                                        args.train_iters)
         log_string += ' elapsed time per iteration (ms): {:.1f} |'.format(
             elapsed_time * 1000.0 / args.log_interval)
         log_string += ' learning rate: {:.3E} |'.format(learning_rate)
@@ -539,6 +549,11 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
             report_memory('after {} iterations'.format(iteration))
             report_memory_flag = False
         timers.log(timers_to_log, normalizer=args.log_interval)
+
+        if args.log_grad_noise_scale:
+            noise_scale = model.grad_noise_scale.noise_scale
+            wandb.log({'noise_scale': noise_scale}, step=iteration)
+            log_string += ' Grad Noise Scale: {:.3E} |'.format(noise_scale)
 
     return report_memory_flag
 

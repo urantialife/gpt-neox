@@ -235,8 +235,67 @@ def obtain_resource_pool(hostfile_path, include_arg, exclude_arg) -> Dict[str, L
                                                  exclude_arg)
     return active_resources
 
+
 def natural_sort(l):
     convert = lambda text: int(text) if text.isdigit() else text.lower()
     alphanum_key = lambda key: [convert(c) for c in re.split('([0-9]+)', key)]
     return sorted(l, key=alphanum_key)
 
+
+class GradientNoiseScale:
+
+    def __init__(self, model, batch_size_small, n_batches, beta):
+        self.batch_size_small, self.batch_size_large = batch_size_small, batch_size_small * n_batches
+        self.n_batches = n_batches
+        self.beta = beta
+        self.model = model
+        self.buffer = []
+        self.ema_scale = None
+        self.ema_noise = None
+        self.scale = None
+        self.noise = None
+        self.noise_scale = None
+        self.n_updates = 0
+
+    def ema(self, avg, yi, i):
+        if avg is None: avg = 0
+        avg = self.beta * avg + (1 - self.beta) * yi
+        return avg, avg / (1 - self.beta ** (i + 1))
+
+    def _flatten_grads(self):
+        grads = [param.grad.flatten().view(-1, 1) for param in self.model.parameters()]
+        grads = torch.cat(grads)
+        return grads
+
+    def _get_scale(self, grads_small, grads_big):
+        return (grads_small - grads_big) / ((1 / self.batch_size_small) - (1 / self.batch_size_large))
+
+    def _get_noise(self, grads_small, grads_big):
+        return (self.batch_size_large * grads_big - self.batch_size_small * grads_small) / (
+                self.batch_size_large - self.batch_size_small)
+
+    def update(self):
+
+        curr_grad = self._flatten_grads()
+        self.buffer.append(curr_grad)
+        if self.n_updates % self.n_batches == self.n_batches - 1:
+            # gather prev n batches and empty buffer
+            past_grads = torch.cat(self.buffer, dim=1)
+            self.buffer = []
+
+            past_grads = past_grads.mean(dim=1)
+
+            g_big = (past_grads ** 2).mean()
+            g_small = (curr_grad ** 2).mean()
+
+            noise = self._get_noise(g_small, g_big)
+            scale = self._get_scale(g_small, g_big)
+
+            self.ema_scale, scale = self.ema(self.ema_scale, scale, self.n_updates)
+            self.ema_noise, noise = self.ema(self.ema_noise, noise, self.n_updates)
+
+            self.scale = scale.item()
+            self.noise = noise.item()
+            self.noise_scale = scale / noise
+
+        self.n_updates += 1
