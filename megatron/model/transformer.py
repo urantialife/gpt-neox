@@ -23,6 +23,7 @@ import torch
 import torch.nn.functional as F
 
 from .norms import  LayerNorm, RMSNorm, ScaleNorm
+from .topk import DifferentiableTopK, topk_items, topk_items_rowwise
 from megatron import get_args
 from megatron import mpu
 from megatron.module import MegatronModule
@@ -170,7 +171,11 @@ class ParallelSelfAttention(MegatronModule):
         super(ParallelSelfAttention, self).__init__()
         args = get_args()
         self.fp16 = args.fp16
-
+        self.topk_attn = args.topk_attn
+        self.topk_attn_type = args.topk_attn_type
+        if self.topk_attn and self.topk_attn_type == "differentiable":
+            self.topk_k = args.topk_k
+            self._topk_fn = DifferentiableTopK(self.topk_k, args.topk_epsilon, args.topk_iters)
         self.attention_mask_func = attention_mask_func
         self.apply_query_key_layer_scaling = args.apply_query_key_layer_scaling
         self.attention_softmax_in_fp32 = args.attention_softmax_in_fp32
@@ -200,7 +205,6 @@ class ParallelSelfAttention(MegatronModule):
             self.norm_factor *= coeff
 
         self.rpe = rpe
-
         self.sparse = sparse
         if self.sparse:
 
@@ -276,6 +280,20 @@ class ParallelSelfAttention(MegatronModule):
         mixed_layer = mixed_layer.view(*input_shape)
 
         return mixed_layer
+
+    def topk_fn(self, x):
+        if self.topk_attn_type == "differentiable":
+            orig_shape = x.size()
+            res = []
+            for b in x:
+                b = b.view(b.size(0), b.size(1) * b.size(2))
+                values, _ = self._topk_fn(b)
+                b = b * torch.einsum('ijk -> ij', values)
+                b = b.view(*orig_shape[1:])
+                res.append(b)
+            return torch.stack(res)
+        else:
+            return topk_items(x, self.topk_k)
 
     def forward(self, hidden_states, attention_mask, layer_past=None,
                 get_key_value=False):
@@ -379,6 +397,10 @@ class ParallelSelfAttention(MegatronModule):
             if exists(self.rpe):
                 rpe = self.rpe(query_layer.size(0), key_layer.size(0))
                 attention_scores += rpe  # [1, np, sq, sk]
+
+            # top k
+            if self.topk_attn:
+                attention_scores = self.topk_fn(attention_scores)
 
             # attention scores and attention mask [b, np, sq, sk]
             attention_probs = self.scale_mask_softmax(attention_scores,

@@ -321,6 +321,14 @@ def _add_training_args(parser):
                        help='Enable one bit adam optimizer [MUST BE USING DEEPSPEED]')
     group.add_argument('--sm3', action='store_true',
                        help='Enable sm3 optimizer')
+    group.add_argument('--topk-attn', action='store_true',
+                       help='Enable topk attention')
+    group.add_argument('--topk-attn-type', type=str, default="differentiable",
+                       choices=["explicit", "differentiable"],
+                       help="type of topk attention to use")
+    group.add_argument('--topk-k', type=int, default=1000)
+    group.add_argument('--topk-epsilon', type=float, default=1e-8)
+    group.add_argument('--topk-iters', type=int, default=100)
     return parser
 
 

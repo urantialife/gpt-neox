@@ -21,3 +21,4 @@ from .gpt2_model import GPT2Model, GPT2ModelPipe
 from .utils import get_params_for_weight_decay_optimization
 from .language_model import get_language_model
 from .norms import RMSNorm, ScaleNorm, LayerNorm
+from .topk import DifferentiableTopK
