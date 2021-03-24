@@ -401,6 +401,8 @@ class ParallelSelfAttention(MegatronModule):
 
             # top k
             if self.topk_attn:
+                # make sure to apply mask *before* top k
+                attention_scores = self.attention_mask_func(attention_scores, attention_mask)
                 attention_scores = self.topk_fn(attention_scores)
 
             # attention scores and attention mask [b, np, sq, sk]
