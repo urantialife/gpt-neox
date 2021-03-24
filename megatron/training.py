@@ -544,17 +544,18 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
             total_loss_dict[got_nan_key])
         total_loss_dict[skipped_iters_key] = 0
         total_loss_dict[got_nan_key] = 0
+
+        if args.log_grad_noise_scale:
+            noise_scale = model.grad_noise_scale.noise_scale
+            log_string += ' Grad Noise Scale: {:.3E} |'.format(noise_scale)
+            if get_use_wandb() and torch.distributed.get_rank() == 0:
+                wandb.log({'noise_scale': noise_scale}, step=iteration)
+
         print_rank_0(log_string)
         if report_memory_flag:
             report_memory('after {} iterations'.format(iteration))
             report_memory_flag = False
         timers.log(timers_to_log, normalizer=args.log_interval)
-
-        if args.log_grad_noise_scale:
-            noise_scale = model.grad_noise_scale.noise_scale
-            wandb.log({'noise_scale': noise_scale}, step=iteration)
-            if get_use_wandb() and torch.distributed.get_rank() == 0:
-                log_string += ' Grad Noise Scale: {:.3E} |'.format(noise_scale)
 
     return report_memory_flag
 
