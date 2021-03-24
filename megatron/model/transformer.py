@@ -173,8 +173,8 @@ class ParallelSelfAttention(MegatronModule):
         self.fp16 = args.fp16
         self.topk_attn = args.topk_attn
         self.topk_attn_type = args.topk_attn_type
+        self.topk_k = args.topk_k
         if self.topk_attn and self.topk_attn_type == "differentiable":
-            self.topk_k = args.topk_k
             self._topk_fn = DifferentiableTopK(self.topk_k, args.topk_epsilon, args.topk_iters)
         self.attention_mask_func = attention_mask_func
         self.apply_query_key_layer_scaling = args.apply_query_key_layer_scaling
