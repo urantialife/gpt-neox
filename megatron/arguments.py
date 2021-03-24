@@ -326,7 +326,7 @@ def _add_training_args(parser):
     group.add_argument('--topk-attn-type', type=str, default="differentiable",
                        choices=["explicit", "differentiable"],
                        help="type of topk attention to use")
-    group.add_argument('--topk-div', type=float, default=0.125, help="keep top seq_len * topk-div items")
+    group.add_argument('--topk-k', type=int, default=8, help="keep top seq_len * topk-div items")
     group.add_argument('--topk-epsilon', type=float, default=1e-8)
     group.add_argument('--topk-iters', type=int, default=100)
     return parser
