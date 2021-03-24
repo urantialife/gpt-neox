@@ -293,7 +293,7 @@ class ParallelSelfAttention(MegatronModule):
                 res.append(b)
             return torch.stack(res)
         else:
-            return topk_items(x, self.topk_k)
+            return topk_items_rowwise(x, self.topk_k)
 
     def forward(self, hidden_states, attention_mask, layer_past=None,
                 get_key_value=False):
