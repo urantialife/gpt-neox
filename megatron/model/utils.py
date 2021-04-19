@@ -22,7 +22,7 @@ import math
 
 import torch
 
-from .transformer import LayerNorm, RMSNorm, ScaleNorm
+from megatron.model.norms import LayerNorm, RMSNorm, ScaleNorm
 
 
 def init_method_normal(sigma):

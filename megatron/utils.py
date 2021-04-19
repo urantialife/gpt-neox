@@ -20,8 +20,9 @@
 import os
 import sys
 import re
+import json
+from json import JSONDecodeError
 from typing import Dict, List
-
 import requests
 import torch
 from deepspeed.launcher.runner import fetch_hostfile, parse_inclusion_exclusion
@@ -240,28 +241,9 @@ def human_readable_flops(n):
 def get_global_batch_size(args):
     return args.batch_size * mpu.get_data_parallel_world_size() * args.gas
 
-
-def get_flops(iter_time_s):
-    args = get_args()
-
-    world_size = torch.distributed.get_world_size()
-    global_batch_size = get_global_batch_size(args)
-    global_flops_per_iteration = flops_per_iteration(args.hidden_size, args.num_layers, global_batch_size,
-                                                     args.seq_length, args.padded_vocab_size)
-    return global_flops_per_iteration / (iter_time_s * world_size)
-
-
-def flops_per_iteration(hidden_size, num_layers, batch_size, seq_len, vocab_size):
-    """Flops formula from https://arxiv.org/pdf/2104.04473.pdf"""
-    return (96 * batch_size * seq_len * num_layers * hidden_size ** 2) * (1 + (seq_len /
-                                                                               (6 * hidden_size)) + (vocab_size / (
-            16 * num_layers * hidden_size)))
-
-
-def get_deepspeed_config():
+def get_deepspeed_config(args):
     # Determine if deepspeed config is JSON or filepath.
     # If JSON then directly load it
-    args = get_args()
     deepspeed_conf = None
     if hasattr(args, 'deepspeed_config'):
         if not os.path.exists(args.deepspeed_config):
@@ -279,3 +261,17 @@ def get_deepspeed_config():
                     f' {args.deepspeed_config}')
 
     return deepspeed_conf
+
+def get_flops(args, iter_time_s):
+    world_size = torch.distributed.get_world_size()
+    global_batch_size = get_global_batch_size(args)
+    global_flops_per_iteration = flops_per_iteration(args.hidden_size, args.num_layers, global_batch_size,
+                                                     args.seq_length, args.padded_vocab_size)
+    return global_flops_per_iteration / (iter_time_s * world_size)
+
+
+def flops_per_iteration(hidden_size, num_layers, batch_size, seq_len, vocab_size):
+    """Flops formula from https://arxiv.org/pdf/2104.04473.pdf"""
+    return (96 * batch_size * seq_len * num_layers * hidden_size ** 2) * (1 + (seq_len /
+                                                                               (6 * hidden_size)) + (vocab_size / (
+            16 * num_layers * hidden_size)))
