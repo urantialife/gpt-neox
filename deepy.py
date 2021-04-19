@@ -19,7 +19,7 @@ from deepspeed.launcher.runner import main
 import requests
 import subprocess
 
-from megatron.config_monster import ConfigMonster
+from megatron.config_to_args import ConfigToArgs
 import logging
 
 from megatron.logging import Tee
@@ -59,7 +59,7 @@ if wandb_token is not None:
     deepspeed.launcher.runner.EXPORT_ENVS.append('WANDB_API_KEY')
     os.environ['WANDB_API_KEY'] = wandb_token
 
-old_style_args, conf = ConfigMonster().consume_args(extra_conf=extra_conf)
+old_style_args, conf = ConfigToArgs().consume_args(extra_conf=extra_conf)
 
 if 'log-dir' in conf:
     os.makedirs(conf['log-dir'], exist_ok=True)

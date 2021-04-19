@@ -30,7 +30,6 @@ from megatron import get_args
 from megatron import print_rank_0
 from megatron import get_adlr_autoresume
 from megatron import mpu
-from megatron.data.samplers import DistributedBatchSampler
 from megatron.fp16 import FP16_Optimizer
 
 
@@ -95,32 +94,6 @@ def check_adlr_autoresume_termination(iteration, model,
             autoresume.request_resume()
         print_rank_0(">>> training terminated. Returning")
         sys.exit(0)
-
-
-def make_data_loader(dataset):
-    """Buld dataloader given an input dataset."""
-    if dataset is None:
-        return None
-    args = get_args()
-
-    # Data parallel arguments.
-    world_size = mpu.get_data_parallel_world_size()
-    rank = mpu.get_data_parallel_rank()
-    global_batch_size = args.batch_size * world_size
-    num_workers = args.num_workers
-
-    # Use a simple sampler with distributed batch sampler.
-    sampler = torch.utils.data.SequentialSampler(dataset)
-    batch_sampler = DistributedBatchSampler(sampler=sampler,
-                                            batch_size=global_batch_size,
-                                            drop_last=True,
-                                            rank=rank,
-                                            world_size=world_size)
-    # Torch dataloader.
-    return torch.utils.data.DataLoader(dataset,
-                                       batch_sampler=batch_sampler,
-                                       num_workers=num_workers,
-                                       pin_memory=True)
 
 
 def get_ltor_masks_and_position_ids(data,
@@ -234,8 +207,75 @@ def obtain_resource_pool(hostfile_path, include_arg, exclude_arg) -> Dict[str, L
                                                  exclude_arg)
     return active_resources
 
+
 def natural_sort(l):
     convert = lambda text: int(text) if text.isdigit() else text.lower()
     alphanum_key = lambda key: [convert(c) for c in re.split('([0-9]+)', key)]
     return sorted(l, key=alphanum_key)
 
+
+def get_total_params(model):
+    # Print number of parameters.
+    if mpu.get_data_parallel_rank() == 0:
+        params = sum([p.nelement() for p in model.parameters()])
+        print(' > number of parameters on model parallel rank {}: {}'.format(
+            mpu.get_model_parallel_rank(), params), flush=True)
+    else:
+        params = 0
+
+    total_n_parameters = torch.tensor([params]).cuda(torch.cuda.current_device())
+    torch.distributed.all_reduce(total_n_parameters)
+    total_n_parameters = total_n_parameters.item()
+    return total_n_parameters
+
+
+def human_readable_flops(n):
+    for unit in ['', 'KFLOPS', 'MFLOPS', 'GFLOPS', 'TFLOPS', 'PFLOPS', 'EFLOPS', 'ZFLOPS']:
+        if abs(n) < 1000.0:
+            return "%3.1f%s" % (n, unit)
+        n /= 1000.0
+    return "%.1f%s" % (n, 'Yi')
+
+
+def get_global_batch_size(args):
+    return args.batch_size * mpu.get_data_parallel_world_size() * args.gas
+
+
+def get_flops(iter_time_s):
+    args = get_args()
+
+    world_size = torch.distributed.get_world_size()
+    global_batch_size = get_global_batch_size(args)
+    global_flops_per_iteration = flops_per_iteration(args.hidden_size, args.num_layers, global_batch_size,
+                                                     args.seq_length, args.padded_vocab_size)
+    return global_flops_per_iteration / (iter_time_s * world_size)
+
+
+def flops_per_iteration(hidden_size, num_layers, batch_size, seq_len, vocab_size):
+    """Flops formula from https://arxiv.org/pdf/2104.04473.pdf"""
+    return (96 * batch_size * seq_len * num_layers * hidden_size ** 2) * (1 + (seq_len /
+                                                                               (6 * hidden_size)) + (vocab_size / (
+            16 * num_layers * hidden_size)))
+
+
+def get_deepspeed_config():
+    # Determine if deepspeed config is JSON or filepath.
+    # If JSON then directly load it
+    args = get_args()
+    deepspeed_conf = None
+    if hasattr(args, 'deepspeed_config'):
+        if not os.path.exists(args.deepspeed_config):
+            # If it's not a path trying parsing as a JSON string
+            deepspeed_json_conf = args.deepspeed_config
+            if len(deepspeed_json_conf) > 2 and deepspeed_json_conf[0] == "'" and deepspeed_json_conf[-1] == "'":
+                deepspeed_json_conf = deepspeed_json_conf[1:-1]  # Remove shell quotes
+            try:
+                deepspeed_conf = json.loads(deepspeed_json_conf)
+                args.deepspeed_config = None  # Pass directly as dictionary to deepspeed
+            except JSONDecodeError:
+                # Not a path or a string
+                raise ValueError(
+                    f'The parameter `deepspeed_config` is neither a file path that exists or a JSON string:'
+                    f' {args.deepspeed_config}')
+
+    return deepspeed_conf

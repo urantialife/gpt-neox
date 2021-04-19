@@ -24,7 +24,7 @@ from megatron.arguments import _get_parser
 import torch
 import shortuuid
 
-log = logging.getLogger('ConfigMonster')
+log = logging.getLogger('config_to_args')
 
 
 def _get_megatron_keys(_megatron_keys_exclude):
@@ -239,7 +239,7 @@ def _configure_train_batch_size(world_size, train_batch=None, micro_batch=None, 
     return train_batch, micro_batch, grad_acc
 
 
-class ConfigMonster:
+class ConfigToArgs:
     """ Clearing up megatron's config monstrosity. """
 
     def __init__(self):

@@ -19,22 +19,18 @@
 """GPT-2 model."""
 
 import torch
+from functools import partial
 
 from megatron import get_args
 from megatron.module import MegatronModule
-from functools import partial
-from .language_model import get_language_model
-from .utils import init_method_normal
-from .utils import scaled_init_method_normal
-from .norms import LayerNorm, RMSNorm, ScaleNorm
-
-# Pipeline parallelism
 from megatron import mpu
 from megatron.mpu import ParallelRelativePositionBias
-from megatron.model.language_model import SinusoidalPositionalEmbedding
 import megatron.fp16 as fp16
-from megatron.model.transformer import ParallelTransformerLayerPipe, EmbeddingPipe
-from megatron.model.language_model import parallel_lm_logits
+from megatron.model.transformer import ParallelTransformerLayerPipe, EmbeddingPipe, get_language_model, \
+    parallel_lm_logits
+from megatron.model.utils import scaled_init_method_normal, init_method_normal
+from megatron.model.norms import LayerNorm, RMSNorm, ScaleNorm
+
 
 from deepspeed.pipe import PipelineModule, LayerSpec, TiedLayerSpec
 

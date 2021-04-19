@@ -17,7 +17,7 @@ class SinusoidalPositionalEmbedding(MegatronModule):
 
 
 class RotaryEmbedding(MegatronModule):
-    
+
     def __init__(self, dim, base=10000):
         super().__init__()
         inv_freq = 1. / (base ** (torch.arange(0, dim, 2).float() / dim))
@@ -42,7 +42,8 @@ class RotaryEmbedding(MegatronModule):
 
 def rotate_half(x):
     x1, x2 = x[..., :x.shape[-1] // 2], x[..., x.shape[-1] // 2:]
-    return torch.cat((-x2, x1), dim=x1.ndim - 1) # dim=-1 triggers a bug in earlier torch versions
+    return torch.cat((-x2, x1), dim=x1.ndim - 1)  # dim=-1 triggers a bug in earlier torch versions
+
 
 @torch.jit.script
 def apply_rotary_pos_emb(q, k, cos, sin):

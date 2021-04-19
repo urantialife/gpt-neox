@@ -19,7 +19,7 @@ from megatron.arguments import _add_network_size_args, _add_regularization_args,
     _add_distributed_args, _add_validation_args, _add_data_args, _add_autoresume_args, _add_zero_args, \
     _add_activation_checkpoint_args
 
-from megatron.config_monster import megatron_keys_exclude, ds_config_keys
+from megatron.config_to_args import megatron_keys_exclude, ds_config_keys
 
 
 @dataclass
