@@ -17,7 +17,7 @@
 
 """Pretrain GPT2"""
 import socket
-
+import deepspeed
 import torch
 import wandb
 from wandb import UsageError
@@ -60,12 +60,19 @@ def model_provider(use_wandb=True, inference=False, get_key_value=True):
 
     args = get_args()
     print_rank_0('building GPT2 model ...')
-    model = GPT2ModelPipe(num_tokentypes=0, parallel_output=True, topology=mpu.get_topology(), inference=inference,
-                          get_key_value=get_key_value)
+    if args.zero_stage == 3: # Special ZeRO 3 initialization functions
+        with deepspeed.zero.Init(data_parallel_group=mpu.get_data_parallel_group(), remote_device="cpu"):
+            model = GPT2ModelPipe(num_tokentypes=0, parallel_output=True, topology=mpu.get_topology(), inference=inference, get_key_value=get_key_value
+                                  
+    # Pleb initialization for people who don't use ZeRO 3        
+    model = GPT2ModelPipe(num_tokentypes=0, parallel_output=True, topology=mpu.get_topology(), inference=inference, get_key_value=get_key_value)
     if not args.is_pipe_parallel:
         # Export PipeParallel model to nn.Sequential model to avoid the overhead of deepspeed's pipe parallel training
         model = model.to_sequential()
     else:
+        if args.zero_stage == 3:
+            raise ValueError('ZeRO Stage 3 cannot be used with pipeline parallel modules. Either set PP = 0 or use another ZeRO configuration.')
+            
         # This is a hack to give us a reference to get_batch_pipe from within training.py
         # We need to call model.set_batch_fn after deepspeed.initialize
         model._megatron_batch_fn = get_batch_pipe
