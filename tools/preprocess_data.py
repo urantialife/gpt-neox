@@ -19,6 +19,7 @@ import argparse
 import multiprocessing
 import os
 import sys
+
 import lm_dataformat as lmd
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__),
@@ -112,7 +113,7 @@ def _multi_lmd(fnames: list):
 
 
 def main():
-    args = get_args()
+    args = get_args() 
     startup_start = time.time()
 
     # use multiprocessing to iterate over input documents

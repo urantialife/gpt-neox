@@ -23,15 +23,13 @@ import torch
 import torch.nn.functional as F
 
 from .norms import LayerNorm, RMSNorm, ScaleNorm
-from megatron import get_args
 from megatron import mpu
-from megatron.module import MegatronModule
 from megatron.model.fused_softmax import FusedScaleMaskSoftmax
 from megatron.model.fused_bias_gelu import bias_gelu_impl
 from megatron.model.utils import openai_gelu, erf_gelu, exists
-from megatron.mpu import ParallelRelativePositionBias
-from megatron.model.positional_embeddings import SinusoidalPositionalEmbedding, RotaryEmbedding, apply_rotary_pos_emb
-
+from megatron.model.positional_embeddings import RotaryEmbedding, apply_rotary_pos_emb
+from megatron.model.fused_bias_dropout import get_bias_dropout_add, bias_dropout_add_fused_train, \
+    bias_dropout_add_fused_inference
 import deepspeed
 from deepspeed.ops.sparse_attention import SparseSelfAttention, VariableSparsityConfig
 
@@ -63,16 +61,16 @@ torch._C._jit_override_can_fuse_on_gpu(True)
 """
 
 
-class GEGLU(MegatronModule):
+class GEGLU(torch.nn.Module):
 
-    def __init__(self):
+    def __init__(self, neox_args):
         super(GEGLU, self).__init__()
-        args = get_args()
-        self.bias_gelu_fusion = args.bias_gelu_fusion
+        
+        self.bias_gelu_fusion = neox_args.bias_gelu_fusion
         self.activation_func = F.gelu
-        if args.openai_gelu:
+        if neox_args.openai_gelu:
             self.activation_func = openai_gelu
-        elif args.onnx_safe:
+        elif neox_args.onnx_safe:
             self.activation_func = erf_gelu
 
     def forward(self, x, bias=None):
@@ -91,7 +89,7 @@ class GEGLU(MegatronModule):
         return intermediate_parallel * x
 
 
-class ParallelMLP(MegatronModule):
+class ParallelMLP(torch.nn.Module):
     """MLP.
 
     MLP will take the input with h hidden state, project it to 4*h
@@ -100,36 +98,38 @@ class ParallelMLP(MegatronModule):
     applied.
     """
 
-    def __init__(self, init_method, output_layer_init_method):
+    def __init__(self, neox_args, init_method, output_layer_init_method):
         super(ParallelMLP, self).__init__()
-        args = get_args()
 
-        if args.geglu:
+        if neox_args.geglu:
             self.activation_type = "geglu"
             mult = 8
-            self.activation_func = GEGLU()
+            self.activation_func = GEGLU(neox_args=neox_args)
         else:
             self.activation_type = "gelu"
             mult = 4
-            self.bias_gelu_fusion = args.bias_gelu_fusion
+            self.bias_gelu_fusion = neox_args.bias_gelu_fusion
             self.activation_func = F.gelu
-            if args.openai_gelu:
+            if neox_args.openai_gelu:
                 self.activation_func = openai_gelu
-            elif args.onnx_safe:
+            elif neox_args.onnx_safe:
                 self.activation_func = erf_gelu
 
         # Project to 4h.
         self.dense_h_to_4h = mpu.ColumnParallelLinear(
-            args.hidden_size,
-            mult * args.hidden_size,
+            neox_args=neox_args,
+            input_size=neox_args.hidden_size,
+            output_size=mult * neox_args.hidden_size,
             gather_output=False,
             init_method=init_method,
-            skip_bias_add=True)
+            skip_bias_add=True
+            )
 
         # Project back to h.
         self.dense_4h_to_h = mpu.RowParallelLinear(
-            4 * args.hidden_size,
-            args.hidden_size,
+            neox_args=neox_args,
+            input_size=4 * neox_args.hidden_size,
+            output_size=neox_args.hidden_size,
             input_is_parallel=True,
             init_method=output_layer_init_method,
             skip_bias_add=True)
@@ -157,17 +157,17 @@ class ParallelMLP(MegatronModule):
         return output, output_bias
 
 
-class ParallelLinear(MegatronModule):
+class ParallelLinear(torch.nn.Module):
     """
     A Parallel Linear Layer transforming the transformer outputs from hidden_size -> vocab_size
     """
 
-    def __init__(self, parallel_output=True, init_method=torch.nn.init.xavier_normal_):
+    def __init__(self, neox_args, parallel_output=True, init_method=torch.nn.init.xavier_normal_):
         super(ParallelLinear, self).__init__()
-        args = get_args()
         self.final_linear = mpu.RowParallelLinear(
-            args.hidden_size,
-            args.padded_vocab_size,
+            neox_args=neox_args,
+            input_size=neox_args.hidden_size,
+            output_size=neox_args.padded_vocab_size,
             bias=False,
             input_is_parallel=False,
             init_method=init_method,
@@ -178,39 +178,40 @@ class ParallelLinear(MegatronModule):
         return self.final_linear(hidden_states)
 
 
-class ParallelSelfAttention(MegatronModule):
+class ParallelSelfAttention(torch.nn.Module):
     """Parallel self-attention layer abstract class.
 
     Self-attention layer takes input with size [b, s, h]
     and returns output of the same size.
     """
 
-    def __init__(self, attention_mask_func, init_method,
+    def __init__(self, neox_args, attention_mask_func, init_method,
                  output_layer_init_method, layer_number, sparse=False,
                  rpe=None, rotary=False, get_key_value=False):
         super(ParallelSelfAttention, self).__init__()
-        args = get_args()
-        self.fp16 = args.precision == "fp16"
+
+        self.fp16 = neox_args.precision == "fp16"
         self.attention_mask_func = attention_mask_func
-        self.apply_query_key_layer_scaling = args.apply_query_key_layer_scaling
+        self.apply_query_key_layer_scaling = neox_args.apply_query_key_layer_scaling
         self.get_key_value = get_key_value
-        self.attention_softmax_in_fp32 = args.attention_softmax_in_fp32
+        self.attention_softmax_in_fp32 = neox_args.attention_softmax_in_fp32
         if self.apply_query_key_layer_scaling:
             self.attention_softmax_in_fp32 = True
         self.layer_number = max(1, layer_number)  # TODO: why do we start from 1 here?
         # Per attention head and per partition values.
         world_size = mpu.get_model_parallel_world_size()
-        self.hidden_size_per_partition = mpu.divide(args.hidden_size,
+        self.hidden_size_per_partition = mpu.divide(neox_args.hidden_size,
                                                     world_size)
         self.hidden_size_per_attention_head = mpu.divide(
-            args.hidden_size, args.num_attention_heads)
+            neox_args.hidden_size, neox_args.num_attention_heads)
         self.num_attention_heads_per_partition = mpu.divide(
-            args.num_attention_heads, world_size)
+            neox_args.num_attention_heads, world_size)
 
         # Strided linear layer.
         self.query_key_value = mpu.ColumnParallelLinear(
-            args.hidden_size,
-            3 * args.hidden_size,
+            neox_args=neox_args,
+            input_size=neox_args.hidden_size,
+            output_size=3 * neox_args.hidden_size,
             gather_output=False,
             init_method=init_method)
 
@@ -223,13 +224,13 @@ class ParallelSelfAttention(MegatronModule):
         self.rpe = rpe
 
         if rotary:
-            if args.rotary_pct == 1:
+            if neox_args.rotary_pct == 1:
                 self.rotary_ndims = None
             else:
-                assert args.rotary_pct < 1
-                self.rotary_ndims = int(self.hidden_size_per_attention_head * args.rotary_pct)
+                assert neox_args.rotary_pct < 1
+                self.rotary_ndims = int(self.hidden_size_per_attention_head * neox_args.rotary_pct)
             dim = self.rotary_ndims if self.rotary_ndims is not None else self.hidden_size_per_attention_head
-            self.rotary_emb = RotaryEmbedding(dim, base=args.rotary_emb_base)
+            self.rotary_emb = RotaryEmbedding(dim, base=neox_args.rotary_emb_base)
         else:
             self.rotary_emb = None
         self.sparse = sparse
@@ -241,20 +242,20 @@ class ParallelSelfAttention(MegatronModule):
             try:
                 self.sparse_attn = SparseSelfAttention(
                     sparsity_config=sparsity_config,
-                    max_seq_length=args.seq_length,
+                    max_seq_length=neox_args.seq_length,
                     attn_mask_mode='add',
                     mpu=mpu)
             except TypeError:
                 # older versions don't have the mpu arg
                 self.sparse_attn = SparseSelfAttention(
                     sparsity_config=sparsity_config,
-                    max_seq_length=args.seq_length,
+                    max_seq_length=neox_args.seq_length,
                     attn_mask_mode='add')
         else:
             self.scale_mask_softmax = FusedScaleMaskSoftmax(
                 self.fp16,
-                args.scaled_upper_triang_masked_softmax_fusion,
-                args.scaled_masked_softmax_fusion,
+                neox_args.scaled_upper_triang_masked_softmax_fusion,
+                neox_args.scaled_masked_softmax_fusion,
                 self.attention_mask_func,
                 self.attention_softmax_in_fp32,
                 coeff)
@@ -262,20 +263,16 @@ class ParallelSelfAttention(MegatronModule):
             # Dropout. Note that for a single iteration, this layer will generate
             # different outputs on different number of parallel partitions but
             # on average it should not be partition dependent.
-            self.attention_dropout = torch.nn.Dropout(args.attention_dropout)
+            self.attention_dropout = torch.nn.Dropout(neox_args.attention_dropout)
 
         # Output.
         self.dense = mpu.RowParallelLinear(
-            args.hidden_size,
-            args.hidden_size,
+            neox_args=neox_args,
+            input_size=neox_args.hidden_size,
+            output_size=neox_args.hidden_size,
             input_is_parallel=True,
             init_method=output_layer_init_method,
             skip_bias_add=True)
-
-        if deepspeed.checkpointing.is_configured():
-            global get_cuda_rng_tracker, checkpoint
-            get_cuda_rng_tracker = deepspeed.checkpointing.get_cuda_rng_tracker
-            checkpoint = deepspeed.checkpointing.checkpoint
 
     def forward(self, hidden_states, attention_mask, layer_past=None):
 
@@ -456,86 +453,62 @@ class ParallelSelfAttention(MegatronModule):
         return output, bias
 
 
-def bias_dropout_add(x, bias, residual, prob, training):
-    # type: (Tensor, Tensor, Tensor, float, bool) -> Tensor
-    out = torch.nn.functional.dropout(x + bias, p=prob, training=training)
-    out = residual + out
-    return out
-
-
-def get_bias_dropout_add(training):
-    def _bias_dropout_add(x, bias, residual, prob):
-        return bias_dropout_add(x, bias, residual, prob, training)
-
-    return _bias_dropout_add
-
-
-@torch.jit.script
-def bias_dropout_add_fused_train(x, bias, residual, prob):
-    # type: (Tensor, Tensor, Tensor, float) -> Tensor
-    return bias_dropout_add(x, bias, residual, prob, True)
-
-
-@torch.jit.script
-def bias_dropout_add_fused_inference(x, bias, residual, prob):
-    # type: (Tensor, Tensor, Tensor, float) -> Tensor
-    return bias_dropout_add(x, bias, residual, prob, False)
-
-
-class ParallelTransformerLayer(MegatronModule):
+class ParallelTransformerLayer(torch.nn.Module):
     """A single transformer layer.
 
     Transformer layer takes input with size [b, s, h] and returns an
     output of the same size.
     """
 
-    def __init__(self, attention_mask_func, init_method,
+    def __init__(self, neox_args, attention_mask_func, init_method,
                  output_layer_init_method, layer_number, sparse=False, rpe=None, rotary=False, get_key_value=False):
-
-        args = get_args()
 
         super(ParallelTransformerLayer, self).__init__()
         self.layer_number = layer_number
 
-        self.apply_residual_connection_post_layernorm \
-            = args.apply_residual_connection_post_layernorm
+        self.apply_residual_connection_post_layernorm = neox_args.apply_residual_connection_post_layernorm
 
-        if args.norm == "rmsnorm":
+        if neox_args.norm == "rmsnorm":
             norm = RMSNorm
-            eps = args.rms_norm_epsilon
-        elif args.norm == "layernorm":
-            eps = args.layernorm_epsilon
+            eps = neox_args.rms_norm_epsilon
+        elif neox_args.norm == "layernorm":
+            eps = neox_args.layernorm_epsilon
             norm = LayerNorm
-        elif args.norm == "scalenorm":
-            eps = args.scalenorm_epsilon
+        elif neox_args.norm == "scalenorm":
+            eps = neox_args.scalenorm_epsilon
             norm = ScaleNorm
 
         # Layernorm on the input data.
-        self.input_layernorm = norm(
-            args.hidden_size,
-            eps=eps)
+        self.input_layernorm = norm(neox_args.hidden_size, eps=eps)
         self.get_key_value = get_key_value
 
         # Self attention.
-        self.attention = ParallelSelfAttention(attention_mask_func, init_method,
-                                               output_layer_init_method,
-                                               layer_number,
-                                               sparse=sparse,
-                                               rpe=rpe,
-                                               get_key_value=self.get_key_value,
-                                               rotary=rotary)
+        self.attention = ParallelSelfAttention(
+            neox_args=neox_args, 
+            attention_mask_func=attention_mask_func, 
+            init_method=init_method,
+            output_layer_init_method=output_layer_init_method,
+            layer_number=layer_number,
+            sparse=sparse,
+            rpe=rpe,
+            get_key_value=self.get_key_value,
+            rotary=rotary
+            )
 
-        self.hidden_dropout = args.hidden_dropout
-        self.bias_dropout_fusion = args.bias_dropout_fusion
+        self.hidden_dropout = neox_args.hidden_dropout
+        self.bias_dropout_fusion = neox_args.bias_dropout_fusion
 
         # Layernorm on the input data.
         self.post_attention_layernorm = norm(
-            args.hidden_size,
+            neox_args.hidden_size,
             eps=eps)
 
         # MLP
-        self.mlp = ParallelMLP(init_method,
-                               output_layer_init_method)
+        self.mlp = ParallelMLP(
+            neox_args=neox_args,
+            init_method=init_method, 
+            output_layer_init_method=output_layer_init_method
+            )
 
     def forward(self, hidden_states, attention_mask, layer_past=None):
         # hidden_states: [b, s, h]
@@ -603,164 +576,6 @@ class ParallelTransformerLayer(MegatronModule):
         return output
 
 
-class ParallelTransformer(MegatronModule):
-    """Transformer class."""
-
-    def __init__(self, attention_mask_func,
-                 init_method, output_layer_init_method, get_key_value=False):
-        super(ParallelTransformer, self).__init__()
-        args = get_args()
-
-        # Store activation checkpoiting flag.
-        self.checkpoint_activations = args.checkpoint_activations
-        self.checkpoint_num_layers = args.checkpoint_num_layers
-
-        self.get_key_value = get_key_value
-        # Number of layers:
-        self.num_layers = args.num_layers
-        self.num_unique_layers = args.num_unique_layers
-        if self.num_unique_layers is None:
-            self.num_unique_layers = self.num_layers
-        assert self.num_layers % self.num_unique_layers == 0, \
-            'number of layers should be divisible by number of unique layers'
-        self.param_sharing_style = args.param_sharing_style
-
-        if args.pos_emb == 'rpe':
-            rpe_emb = ParallelRelativePositionBias(causal=True, num_buckets=args.rpe_num_buckets,
-                                                   max_distance=args.rpe_max_distance,
-                                                   heads=args.num_attention_heads)
-
-        # Transformer layers.
-        sparsity = args.sparsity
-
-        def build_layer(layer_number):
-            if sparsity == 'none':
-                sparse = False
-            elif sparsity == 'all':
-                sparse = True
-            elif sparsity == 'interspersed':
-                sparse = not layer_number % 2 == 0
-            else:
-                raise ValueError(f'Sparsity type {sparsity} not recognized')
-            return ParallelTransformerLayer(
-                attention_mask_func, init_method,
-                output_layer_init_method, layer_number, sparse=sparse,
-                rpe=rpe_emb if args.pos_emb == 'rpe' else None,
-                get_key_value=get_key_value,
-                rotary=args.pos_emb == 'rotary')
-
-        self.layers = torch.nn.ModuleList(
-            [build_layer(i + 1) for i in range(self.num_unique_layers)])
-
-        # Print layer ordering.
-        if self.num_layers != self.num_unique_layers:
-            if torch.distributed.get_rank() == 0:
-                print('> will be using the following layer ordering:')
-                for i in range(self.num_layers):
-                    print('   layer id: {:3d} --> unique layer id: '
-                          '{:3d}'.format(i, self._get_layer_index(i)),
-                          flush=True)
-
-        # Final layer norm before output.
-        if args.norm == "rmsnorm":
-            norm = RMSNorm
-            eps = args.rms_norm_epsilon
-        elif args.norm == "layernorm":
-            eps = args.layernorm_epsilon
-            norm = LayerNorm
-        elif args.norm == "scalenorm":
-            eps = args.scalenorm_epsilon
-            norm = ScaleNorm
-
-        self.final_layernorm = norm(
-            args.hidden_size,
-            eps=eps)
-
-        if deepspeed.checkpointing.is_configured():
-            global get_cuda_rng_tracker, checkpoint
-            get_cuda_rng_tracker = deepspeed.checkpointing.get_cuda_rng_tracker
-            checkpoint = deepspeed.checkpointing.checkpoint
-
-    def _get_layer_index(self, layer_number):
-        if self.param_sharing_style == 'grouped':
-            return layer_number % self.num_unique_layers
-        if self.param_sharing_style == 'spaced':
-            return layer_number // (self.num_layers // self.num_unique_layers)
-        assert False, 'should not be here'
-
-    def _get_layer(self, layer_number):
-        return self.layers[self._get_layer_index(layer_number)]
-
-    def _checkpointed_forward(self, hidden_states, attention_mask):
-        """Forward method with activation checkpointing."""
-
-        def custom(start, end):
-            def custom_forward(*inputs):
-                x_ = inputs[0]
-                for index in range(start, end):
-                    layer = self._get_layer(index)
-                    x_ = layer(x_, inputs[1])
-                return x_
-
-            return custom_forward
-
-        # Make sure memory is freed.
-        mpu.reset_checkpointed_activations_memory_buffer()
-        l = 0
-        while l < self.num_layers:
-            hidden_states = mpu.checkpoint(
-                custom(l, l + self.checkpoint_num_layers),
-                hidden_states, attention_mask)
-            l += self.checkpoint_num_layers
-
-        return hidden_states
-
-    def forward(self, hidden_states, attention_mask, layer_past=None, ):
-        # Checks
-        if layer_past is not None and layer_past.numel() > 0:
-            assert self.get_key_value, \
-                'for not None values in layer_past, ' \
-                'expected get_key_value to be set'
-        if self.get_key_value:
-            assert not self.checkpoint_activations, \
-                'get_key_value does not work with ' \
-                'activation checkpointing'
-
-        # data format change to avoid explicit tranposes : [b s h] --> [s b h]
-        hidden_states = hidden_states.transpose(0, 1).contiguous()
-
-        if self.checkpoint_activations:
-            hidden_states = self._checkpointed_forward(hidden_states,
-                                                       attention_mask)
-        else:
-            if self.get_key_value:
-                presents = torch.Tensor()
-            for index in range(self.num_layers):
-                layer = self._get_layer(index)
-                past = None
-                if layer_past.numel() > 0:
-                    past = layer_past[index]
-                hidden_states = layer(hidden_states,
-                                      attention_mask,
-                                      layer_past=past)
-                if self.get_key_value:
-                    hidden_states, present = hidden_states
-                    if presents.numel() == 0:
-                        presents = present.unsqueeze(dim=0)
-                    else:
-                        presents = torch.cat((presents, present.unsqueeze(dim=0)))
-
-        # reverting data format change [s b h] --> [b s h]
-        hidden_states = hidden_states.transpose(0, 1).contiguous()
-
-        # Final layer norm.
-        output = self.final_layernorm(hidden_states)
-        if self.get_key_value:
-            output = [output, presents]
-
-        return output
-
-
 class ParallelTransformerLayerPipe(ParallelTransformerLayer):
     """Extends ParallelTransformerLayer to forward attention_mask through the pipeline. """
 
@@ -794,7 +609,25 @@ class ParallelTransformerLayerPipe(ParallelTransformerLayer):
                 f'In layer {self.layer_number} - Incorrect number of arguments ({len(args)}) for {self.__class__.__name__}')
 
 
-class NormPipe(MegatronModule):
+class ParallelLinearPipe(ParallelLinear):
+    """Another helper class to pass presents through to the output when doing inference with a Pipe Parallel model"""
+
+    def forward(self, args):
+        if not isinstance(args, tuple):
+            # in training, args = hidden_state (tensor, so we check if object isn't a tuple and pass through here)
+            hidden_state = args
+            logits, bias = super().forward(hidden_state)
+            return logits
+        elif len(args) == 2:
+            # we are in inference, so input is (hidden_states, presents)
+            hidden_state, presents = args
+            logits, bias = super().forward(hidden_state)
+            return logits, presents
+        else:
+            raise ValueError(f'Incorrect number of arguments for {self.__class__.__name__}')
+
+
+class NormPipe(torch.nn.Module):
     """Just a helper class to pass presents through to the output when doing inference with a Pipe Parallel model"""
 
     def __init__(self, norm_class, hidden_size, eps):
@@ -815,205 +648,20 @@ class NormPipe(MegatronModule):
             raise ValueError(f'Incorrect number of arguments for {self.__class__.__name__}')
 
 
-class Embedding(MegatronModule):
-    """Language model embeddings.
-    Arguments:
-        hidden_size: hidden size
-        vocab_size: vocabulary size
-        max_sequence_length: maximum size of sequence. This
-                             is used for positional embedding
-        embedding_dropout_prob: dropout probability for embeddings
-        init_method: weight initialization method
-        num_tokentypes: size of the token-type embeddings. 0 value
-                        will ignore this embedding
-    """
+def parallel_lm_logits(input_, word_embeddings_weight, parallel_output,
+                       bias=None):
+    """LM logits using word embedding weights."""
+    # Parallel logits.
+    input_parallel = mpu.copy_to_model_parallel_region(input_)
 
-    def __init__(self,
-                 hidden_size,
-                 vocab_size,
-                 max_sequence_length,
-                 embedding_dropout_prob,
-                 init_method,
-                 num_tokentypes=0):
-        super(Embedding, self).__init__()
-        args = get_args()
-        self.hidden_size = hidden_size
-        self.init_method = init_method
-        self.num_tokentypes = num_tokentypes
+    # Matrix multiply.
+    if bias is None:
+        logits_parallel = F.linear(input_parallel, word_embeddings_weight)
+    else:
+        logits_parallel = F.linear(input_parallel, word_embeddings_weight, bias)
 
-        # Word embeddings (parallel).
-        self.word_embeddings = mpu.VocabParallelEmbedding(
-            vocab_size, self.hidden_size, init_method=self.init_method)
-        self._word_embeddings_key = 'word_embeddings'
+    # Gather if needed.
+    if parallel_output:
+        return logits_parallel
 
-        # Position embedding (serial).
-        self.embedding_type = args.pos_emb
-        if self.embedding_type == "learned":
-            self.position_embeddings = torch.nn.Embedding(
-                max_sequence_length, self.hidden_size)
-            self._position_embeddings_key = 'position_embeddings'
-            # Initialize the position embeddings.
-            self.init_method(self.position_embeddings.weight)
-        elif self.embedding_type == "sinusoidal":
-            self.position_embeddings = SinusoidalPositionalEmbedding(self.hidden_size)
-
-        # Token type embedding.
-        # Add this as an optional field that can be added through
-        # method call so we can load a pretrain model without
-        # token types and add them as needed.
-        self._tokentype_embeddings_key = 'tokentype_embeddings'
-        if self.num_tokentypes > 0:
-            self.tokentype_embeddings = torch.nn.Embedding(self.num_tokentypes,
-                                                           self.hidden_size)
-            # Initialize the token-type embeddings.
-            self.init_method(self.tokentype_embeddings.weight)
-        else:
-            self.tokentype_embeddings = None
-
-        # Embeddings dropout
-        self.embedding_dropout = torch.nn.Dropout(embedding_dropout_prob)
-
-    def add_tokentype_embeddings(self, num_tokentypes):
-        """Add token-type embedding. This function is provided so we can add
-        token-type embeddings in case the pretrained model does not have it.
-        This allows us to load the model normally and then add this embedding.
-        """
-        if self.tokentype_embeddings is not None:
-            raise Exception('tokentype embeddings is already initialized')
-        if torch.distributed.get_rank() == 0:
-            print('adding embedding for {} tokentypes'.format(num_tokentypes),
-                  flush=True)
-        self.num_tokentypes = num_tokentypes
-        self.tokentype_embeddings = torch.nn.Embedding(num_tokentypes,
-                                                       self.hidden_size)
-        # Initialize the token-type embeddings.
-        self.init_method(self.tokentype_embeddings.weight)
-
-    def forward(self, input_ids, position_ids, tokentype_ids=None):
-        # Embeddings.
-        words_embeddings = self.word_embeddings(input_ids)
-        if self.embedding_type in ["learned", "sinusoidal"]:
-            position_embeddings = self.position_embeddings(position_ids)
-            embeddings = words_embeddings + position_embeddings
-        else:
-            embeddings = words_embeddings
-        if tokentype_ids is not None:
-            assert self.tokentype_embeddings is not None
-            embeddings = embeddings + self.tokentype_embeddings(tokentype_ids)
-        else:
-            assert self.tokentype_embeddings is None
-
-        # Dropout.
-        embeddings = self.embedding_dropout(embeddings)
-        return embeddings
-
-    def state_dict_for_save_checkpoint(self, destination=None, prefix='',
-                                       keep_vars=False):
-        """For easy load."""
-
-        state_dict_ = {}
-        state_dict_[self._word_embeddings_key] \
-            = self.word_embeddings.state_dict(destination, prefix, keep_vars)
-        if self.embedding_type == "learned":
-            state_dict_[self._position_embeddings_key] \
-                = self.position_embeddings.state_dict(
-                destination, prefix, keep_vars)
-        if self.num_tokentypes > 0:
-            state_dict_[self._tokentype_embeddings_key] \
-                = self.tokentype_embeddings.state_dict(
-                destination, prefix, keep_vars)
-
-        return state_dict_
-
-    def load_state_dict(self, state_dict, strict=True):
-        """Customized load."""
-
-        # Word embedding.
-        if self._word_embeddings_key in state_dict:
-            state_dict_ = state_dict[self._word_embeddings_key]
-        else:
-            # for backward compatibility.
-            state_dict_ = {}
-            for key in state_dict.keys():
-                if 'word_embeddings' in key:
-                    state_dict_[key.split('word_embeddings.')[1]] \
-                        = state_dict[key]
-        self.word_embeddings.load_state_dict(state_dict_, strict=strict)
-
-        # Position embedding.
-        if self.embedding_type == "learned":
-            if self._position_embeddings_key in state_dict:
-                state_dict_ = state_dict[self._position_embeddings_key]
-            else:
-                # for backward compatibility.
-                state_dict_ = {}
-                for key in state_dict.keys():
-                    if 'position_embeddings' in key:
-                        state_dict_[key.split('position_embeddings.')[1]] \
-                            = state_dict[key]
-            self.position_embeddings.load_state_dict(state_dict_, strict=strict)
-
-        # Tokentype embedding.
-        if self.num_tokentypes > 0:
-            state_dict_ = {}
-            if self._tokentype_embeddings_key in state_dict:
-                state_dict_ = state_dict[self._tokentype_embeddings_key]
-            else:
-                # for backward compatibility.
-                for key in state_dict.keys():
-                    if 'tokentype_embeddings' in key:
-                        state_dict_[key.split('tokentype_embeddings.')[1]] \
-                            = state_dict[key]
-            if len(state_dict_.keys()) > 0:
-                self.tokentype_embeddings.load_state_dict(state_dict_,
-                                                          strict=strict)
-            else:
-                print('***WARNING*** expected tokentype embeddings in the '
-                      'checkpoint but could not find it', flush=True)
-
-
-class ParallelLinearPipe(ParallelLinear):
-    """Another helper class to pass presents through to the output when doing inference with a Pipe Parallel model"""
-
-    def forward(self, args):
-        if not isinstance(args, tuple):
-            # in training, args = hidden_state (tensor, so we check if object isn't a tuple and pass through here)
-            hidden_state = args
-            logits, bias = super().forward(hidden_state)
-            return logits
-        elif len(args) == 2:
-            # we are in inference, so input is (hidden_states, presents)
-            hidden_state, presents = args
-            logits, bias = super().forward(hidden_state)
-            return logits, presents
-        else:
-            raise ValueError(f'Incorrect number of arguments for {self.__class__.__name__}')
-
-
-class EmbeddingPipe(Embedding):
-    """Extends Embedding to forward attention_mask through the pipeline."""
-
-    @property
-    def word_embeddings_weight(self):
-        """Easy accessory for the pipeline engine to tie embeddings across stages."""
-        return self.word_embeddings.weight
-
-    def forward(self, args):
-        in_inference = len(args) == 4  # if the length of the args is 4, we're in inference :|
-        in_train = len(args) == 3
-
-        input_ids = args[0]
-        position_ids = args[1]
-        attention_mask = args[2]
-        if in_inference:
-            layer_past = args[3]
-        elif in_train:
-            pass
-        else:
-            raise ValueError(f'Incorrect number of args passed to {self.__class__.__name__}')
-
-        embeddings = super().forward(input_ids, position_ids)
-        if in_inference:
-            return embeddings, layer_past, attention_mask
-        else:
-            return embeddings, attention_mask
+    return mpu.gather_from_model_parallel_region(logits_parallel)
