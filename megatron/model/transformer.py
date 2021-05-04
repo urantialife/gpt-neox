@@ -21,6 +21,7 @@
 import math
 import torch
 import torch.nn.functional as F
+import deepspeeed
 
 from .norms import LayerNorm, RMSNorm, ScaleNorm
 from megatron import mpu
@@ -115,23 +116,39 @@ class ParallelMLP(torch.nn.Module):
                 self.activation_func = erf_gelu
 
         # Project to 4h.
-        self.dense_h_to_4h = mpu.ColumnParallelLinear(
-            neox_args=neox_args,
-            input_size=neox_args.hidden_size,
-            output_size=mult * neox_args.hidden_size,
+        self.dense_h_to_4h = deepspeed.zero.TiledLinearReturnBias(
+            in_features=neox_args.hidden_size,
+            out_features=multi * neox_args.hidden_size,
+            in_splits=neox_args.tile_factor,
+            out_splits=multi*args.tile_factor,
+            linear_cls=mpu.ColumnParallelLinear,
+            combine_out_splits=True,
             gather_output=False,
             init_method=init_method,
             skip_bias_add=True
         )
 
         # Project back to h.
-        self.dense_4h_to_h = mpu.RowParallelLinear(
-            neox_args=neox_args,
-            input_size=4 * neox_args.hidden_size,
-            output_size=neox_args.hidden_size,
-            input_is_parallel=True,
-            init_method=output_layer_init_method,
-            skip_bias_add=True)
+        if not neox_args.memory_centric_tiled_linear:
+            self.dense_4h_to_h = mpu.RowParallelLinear(
+                neox_args=neox_args,
+                input_size=multi * neox_args.hidden_size,
+                output_size=neox_args.hidden_size,
+                input_is_parallel=True,
+                init_method=output_layer_init_method,
+                skip_bias_add=True)
+        else:
+            self.dense_4h_to_h = deepspeed.zero.TiledLinearReturnBias(
+                in_features=4*neox_args.hidden_size,
+                out_features=neox_args.hidden_size,
+                linear_cls=mpu.RowParallelLinear,
+                in_splits=4*neox_args.tile_factor,
+                out_splits=neox_args.tile_factor,
+                input_is_already_split=False,
+                combine_out_splits=True,
+                input_is_parallel=True,
+                init_method=output_layer_init_method,
+                skip_bias_add=True)
 
     def forward(self, hidden_states):
 
@@ -207,12 +224,24 @@ class ParallelSelfAttention(torch.nn.Module):
             neox_args.num_attention_heads, world_size)
 
         # Strided linear layer.
-        self.query_key_value = mpu.ColumnParallelLinear(
-            neox_args=neox_args,
-            input_size=neox_args.hidden_size,
-            output_size=3 * neox_args.hidden_size,
-            gather_output=False,
-            init_method=init_method)
+        if neox_args.memory_centric_tiled_linear:
+            self.query_key_value = deepspeed.zero.TiledLinearReturnBias(
+                in_features=neox_args.hidden_size,
+                out_features=3*neox_args.hidden_size,
+                linear_cls=mpu.ColumnParallelLinear,
+                gather_output=False,
+                init_method=init_method,
+                in_splits=neox_args.tile_factor,
+                out_splits=3*neox_args.tile_factor,
+                combine_out_splits=True
+            )
+	else:
+            self.query_key_value = mpu.ColumnParallelLinear(
+                neox_args=neox_args,
+                input_size=neox_args.hidden_size,
+                output_size=3 * neox_args.hidden_size,
+                gather_output=False,
+                init_method=init_method)
 
         coeff = None
         self.norm_factor = math.sqrt(self.hidden_size_per_attention_head)
@@ -254,13 +283,26 @@ class ParallelSelfAttention(torch.nn.Module):
             self.attention_dropout = torch.nn.Dropout(neox_args.attention_dropout)
 
         # Output.
-        self.dense = mpu.RowParallelLinear(
-            neox_args=neox_args,
-            input_size=neox_args.hidden_size,
-            output_size=neox_args.hidden_size,
-            input_is_parallel=True,
-            init_method=output_layer_init_method,
-            skip_bias_add=True)
+        if neox_args.memory_centric_tiled_linear:
+            self.dense = deepspeed.zero.TiledLinearReturnBias(
+                in_features=neox_args.hidden_size,
+                out_features=neox_args.hidden_size,
+                linear_cls=mpu.RowParallelLinear,
+                input_is_parallel=True,
+                init_method=output_layer_init_method,
+                skip_bias_add=True,
+                out_splits=neox_args.tile_factor,
+                in_splits=neox_args.tile_factor,
+                combine_out_splits=True
+            )
+        else:
+            self.dense = mpu.RowParallelLinear(
+                neox_args=neox_args,
+                input_size=neox_args.hidden_size,
+                output_size=neox_args.hidden_size,
+                input_is_parallel=True,
+                init_method=output_layer_init_method,
+                skip_bias_add=True)
 
     def attention(self, query_layer, key_layer, value_layer, layer_past, attention_mask):
         # ===================================

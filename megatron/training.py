@@ -201,7 +201,10 @@ def get_model(neox_args, inference=False, get_key_value=True):
     print_rank_0('building GPT2 model ...')
 
     # Build model on cpu.
-    model = GPT2ModelPipe(neox_args=neox_args, num_tokentypes=0, parallel_output=True, topology=mpu.get_topology(), inference=inference, get_key_value=get_key_value)
+    with deepspeed.zero.Init(data_parallel_group=mpu.get_data_parallel_group(),
+                             remote_device="cpu",
+                             enabled=(neox_args.zero_stage == 3)):
+        model = GPT2ModelPipe(neox_args=neox_args, num_tokentypes=0, parallel_output=True, topology=mpu.get_topology(), inference=inference, get_key_value=get_key_value)
     if not neox_args.is_pipe_parallel:
         # Export PipeParallel model to nn.Sequential model to avoid the overhead of deepspeed's pipe parallel training
         model = model.to_sequential()
