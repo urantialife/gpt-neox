@@ -16,6 +16,7 @@
 # limitations under the License.
 
 """Pretrain GPT2"""
+<<<<<<< HEAD
 import socket
 import deepspeed
 import torch
@@ -173,7 +174,13 @@ def train_valid_test_datasets_provider(train_val_test_num_samples):
 
     return train_ds, valid_ds, test_ds
 
+=======
+from megatron.neox_arguments import NeoXArgs
+from megatron.training import pretrain
+>>>>>>> d336ce9e6e39acacdf1be31bfccd43a551d53e17
 
 if __name__ == "__main__":
-    pretrain(train_valid_test_datasets_provider, model_provider, forward_step,
-             args_defaults={'tokenizer_type': 'GPT2BPETokenizer'})
+    neox_args = NeoXArgs.consume_neox_args()
+    neox_args.build_tokenizer() # tokenizer needs to be build in training in order to set the padding vocab
+    neox_args.initialize_tensorboard_writer()  # is initialized if tensorboard directory is defined
+    pretrain(neox_args=neox_args)
