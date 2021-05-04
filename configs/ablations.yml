@@ -69,7 +69,7 @@
 
    # misc. training settings
    "train-iters": 12500,
-   "lr-decay-iters": 320000,
+   "lr-decay-iters": 12500,
    "distributed-backend": "nccl",
    "lr-decay-style": "cosine",
    "warmup": 0.01,
