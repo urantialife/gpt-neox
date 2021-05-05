@@ -67,17 +67,17 @@
    },
 
    # misc. training settings
-   "train-iters": 6000,
-   "lr-decay-iters": 6000,
+   "train-iters": 3600,
+   "lr-decay-iters": 3600,
    "distributed-backend": "nccl",
    "lr-decay-style": "cosine",
    "warmup": 0.01,
-   "save-interval": 8000,
-   "eval-interval": 400,
-   "eval-iters": 15,
+   "save-interval": 1200,
+   "eval-interval": 180,
+   "eval-iters": 10,
 
    # logging
-   "log-interval": 100,
+   "log-interval": 120,
    "steps_per_print": 10,
    "keep-last-n-checkpoints": 4,
    "wall_clock_breakdown": true,
