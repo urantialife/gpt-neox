@@ -18,8 +18,6 @@
    # these should provide some speedup but takes a while to build, set to true if desired
    "scaled-upper-triang-masked-softmax-fusion": false,
    "bias-gelu-fusion": false,
-
-
    
    # optimizer settings
    "optimizer": {
@@ -41,7 +39,8 @@
     "cpu_offload": False
   },
    # batch / data settings
-   "train_micro_batch_size_per_gpu": 16,
+   "train_micro_batch_size_per_gpu": 40,
+   "gas": 1,
    "data-impl": "mmap",
    "split": "18,1,1",
 
@@ -68,14 +67,14 @@
    },
 
    # misc. training settings
-   "train-iters": 12500,
-   "lr-decay-iters": 12500,
+   "train-iters": 6000,
+   "lr-decay-iters": 6000,
    "distributed-backend": "nccl",
    "lr-decay-style": "cosine",
    "warmup": 0.01,
-   "save-interval": 1000,
-   "eval-interval": 500,
-   "eval-iters": 25,
+   "save-interval": 8000,
+   "eval-interval": 400,
+   "eval-iters": 15,
 
    # logging
    "log-interval": 100,
