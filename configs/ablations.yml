@@ -2,7 +2,7 @@
 {
    # parallelism settings ( you will want to change these based on your cluster setup, ideally scheduling pipeline stages
    # across the node boundaries )
-   "pipe-parallel-size": 0,
+   "pipe-parallel-size": 1,
    "model-parallel-size": 1,
 
    # model settings
@@ -16,8 +16,8 @@
    "no-weight-tying": true,
 
    # these should provide some speedup but takes a while to build, set to true if desired
-   "scaled-upper-triang-masked-softmax-fusion": false,
-   "bias-gelu-fusion": false,
+   "scaled-upper-triang-masked-softmax-fusion": True,
+   "bias-gelu-fusion": True,
    
    # optimizer settings
    "optimizer": {
@@ -40,7 +40,6 @@
   },
    # batch / data settings
    "train_micro_batch_size_per_gpu": 40,
-   "gas": 1,
    "data-impl": "mmap",
    "split": "18,1,1",
 
