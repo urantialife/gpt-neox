@@ -16,8 +16,8 @@
    "no-weight-tying": true,
 
    # these should provide some speedup but takes a while to build, set to true if desired
-   "scaled-upper-triang-masked-softmax-fusion": True,
-   "bias-gelu-fusion": True,
+   "scaled-upper-triang-masked-softmax-fusion": false,
+   "bias-gelu-fusion": false,
    
    # optimizer settings
    "optimizer": {
@@ -39,7 +39,7 @@
     "cpu_offload": False
   },
    # batch / data settings
-   "train_micro_batch_size_per_gpu": 38,
+   "train_micro_batch_size_per_gpu": 30,
    "data-impl": "mmap",
    "split": "18,1,1",
 
