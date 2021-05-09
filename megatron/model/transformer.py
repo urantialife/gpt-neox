@@ -21,7 +21,7 @@
 import math
 import torch
 import torch.nn.functional as F
-import deepspeeed
+import deepspeed
 
 from .norms import LayerNorm, RMSNorm, ScaleNorm
 from megatron import mpu
