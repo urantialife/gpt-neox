@@ -291,8 +291,8 @@ class NeoXArgsOptimizer(NeoXArgsTemplate):
     stage3_max_reuse_distance: int = 1000000000
     stage3_prefetch_bucket_size: int = 10000000
     stage3_param_persistence_threshold: int = 100000
-    offload_optimizer: dict = {device = "cpu"}
-    offload_param: dict = {device = "cpu"}
+    offload_optimizer: str = "cpu"
+    offload_param: str = "cpu"
 
     lr: float = None
     """
