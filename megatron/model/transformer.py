@@ -235,7 +235,7 @@ class ParallelSelfAttention(torch.nn.Module):
                 out_splits=3*neox_args.tile_factor,
                 combine_out_splits=True
             )
-	else:
+        else:
             self.query_key_value = mpu.ColumnParallelLinear(
                 neox_args=neox_args,
                 input_size=neox_args.hidden_size,
