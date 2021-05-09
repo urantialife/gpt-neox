@@ -14,7 +14,6 @@
    "norm": "layernorm",
    "pos-emb": "rotary",
    "no-weight-tying": true,
-   "memory_centric_tiled_linear": true,
    "tile_factor": 1,
 
    # these should provide some speedup but takes a while to build, set to true if desired
@@ -44,8 +43,8 @@
     "stage3_max_reuse_distance": 1000000000,
     "stage3_prefetch_bucket_size": 10000000,
     "stage3_param_persistence_threshold": 100000,
-    "offload_optimizer": {device = "cpu"},
-    "offload_param": {device = "cpu"}
+    "offload_optimizer": "cpu",
+    "offload_param": "cpu"
   },
 
    # batch / data settings
