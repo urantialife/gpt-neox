@@ -129,7 +129,7 @@ class ParallelMLP(torch.nn.Module):
         )
 
         # Project back to h.
-        if not neox_args.memory_centric_tiled_linear:
+        if not neox_args.zero_stage == 3:
             self.dense_4h_to_h = mpu.RowParallelLinear(
                 neox_args=neox_args,
                 input_size=multi * neox_args.hidden_size,
@@ -224,7 +224,7 @@ class ParallelSelfAttention(torch.nn.Module):
             neox_args.num_attention_heads, world_size)
 
         # Strided linear layer.
-        if neox_args.memory_centric_tiled_linear:
+        if neox_args.zero_stage == 3:
             self.query_key_value = deepspeed.zero.TiledLinearReturnBias(
                 in_features=neox_args.hidden_size,
                 out_features=3*neox_args.hidden_size,
@@ -283,7 +283,7 @@ class ParallelSelfAttention(torch.nn.Module):
             self.attention_dropout = torch.nn.Dropout(neox_args.attention_dropout)
 
         # Output.
-        if neox_args.memory_centric_tiled_linear:
+        if neox_args.zero_stage == 3:
             self.dense = deepspeed.zero.TiledLinearReturnBias(
                 in_features=neox_args.hidden_size,
                 out_features=neox_args.hidden_size,
