@@ -15,6 +15,7 @@ jobs:
         with:
           root-reserve-mb: 8192
           remove-dotnet: true
+          temp-reserve-mb: 4096
 
       -
         name: Checkout
