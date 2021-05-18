@@ -13,9 +13,8 @@ jobs:
         name: Maximize build disk space
         uses: easimon/maximize-build-space@v4
         with:
-          root-reserve-mb: 8192
-          remove-dotnet: true
-          temp-reserve-mb: 4096
+          overprovision-lvm: 'true'
+          remove-dotnet: 'true'
 
       -
         name: Checkout
