@@ -9,9 +9,12 @@ import argparse
 import shutil
 
 from dataclasses import dataclass
-from typing import List
+from typing import List, Dict
 from socket import gethostname
-from typing import Literal, Dict
+try:
+    from typing import Literal
+except ImportError:
+    from typing_extensions import Literal
 from deepspeed.launcher.runner import DLTS_HOSTFILE
 from megatron.logging import Tee
 from megatron.tokenizer import build_tokenizer
@@ -593,6 +596,8 @@ class NeoXArgs(*BASE_CLASSES):
         assert len(self.attention_config) == self.num_layers, "Length of attention config list must equal num_layers"
         for item in self.attention_config:
             assert item in ATTENTION_TYPE_CHOICES, f"Attention type {item} not recognized"
+        if "gmlp" in self.attention_config or "amlp" in self.attention_config:
+            assert not self.partition_activations, "GMLP Blocks are not compatible with partition activations"
 
         # Sparsity config
         if self.sparsity_config is None:
